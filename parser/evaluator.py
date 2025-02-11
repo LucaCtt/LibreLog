@@ -129,39 +129,44 @@ benchmark_settings = {
 
 
 def log_file_to_logs(
-    log_file, logformat, first_lines_percent=100, start_line_percent=0
+    log_file, log_format, first_lines_percent=100, start_line_percent=0
 ):
-    """Function to transform log file to dataframe, reads from a specific start line and reads up to a given percent of lines."""
-    headers, regex = generate_logformat_regex(logformat)
+    """
+    Transforms a log file to dataframe,
+    reading from a specific start line and up to a given percent of lines.
+    """
+    headers, regex = generate_logformat_regex(log_format)
+
     log_messages = []
+
     with open(log_file, "r") as fin:
         lines = fin.readlines()
-        total_lines = len(lines)  
+        total_lines = len(lines)
         start_line = int(
             total_lines * start_line_percent / 100
-        )  
+        )
         lines_to_read = int(
             (total_lines - start_line) * (first_lines_percent / 100)
-        )  
-        for i, line in enumerate(
-            lines[start_line : start_line + lines_to_read], start=start_line
+        )
+        for _, line in enumerate(
+            lines[start_line: start_line + lines_to_read], start=start_line
         ):
-
             try:
                 match = regex.search(line.strip())
                 if match:
                     message = [match.group(header) for header in headers]
                     log_messages.append(message)
-            except Exception as e:
+            except Exception:
                 print("Skip line: ", line)
 
     logdf = pd.DataFrame(log_messages, columns=headers)
     logdf.insert(
         0, "LineId", range(start_line + 1, start_line + len(log_messages) + 1)
-    )  
+    )
 
     array_result = logdf.loc[:, ["Content"]].values
     list_result = [list(row) for row in array_result]
+
     return list_result
 
 
@@ -179,13 +184,13 @@ def read_column_from_csv(file_path, column_name="Content"):
     return column_data
 
 
-def generate_logformat_regex(logformat):
+def generate_logformat_regex(log_format):
     """
-    Function to generate regular expression to split log messages
+    Generates regular expression to split log messages.
+    """
 
-    """
     headers = []
-    splitters = re.split(r"(<[^<>]+>)", logformat)
+    splitters = re.split(r"(<[^<>]+>)", log_format)
     regex = ""
     for k in range(len(splitters)):
         if k % 2 == 0:
@@ -200,7 +205,8 @@ def generate_logformat_regex(logformat):
 
 
 def group_logs_using_parser(grouped_logs):
-    df = pd.DataFrame(grouped_logs, columns=["Content", "EventId", "EventTemplate"])
+    df = pd.DataFrame(grouped_logs, columns=[
+                      "Content", "EventId", "EventTemplate"])
     df = df[["Content", "EventId", "EventTemplate"]]
     grouped = df.groupby("EventId")
     groups_dict = {}
@@ -220,7 +226,8 @@ def check_group_count(groups_dict, removed_items=[]):
     for eventID, logs in list(groups_dict.items()):
         if len(logs) < 5:
             removed_items.extend(
-                [[log["Content"], log["EventId"], log["EventTemplate"]] for log in logs]
+                [[log["Content"], log["EventId"], log["EventTemplate"]]
+                    for log in logs]
             )
             del groups_dict[eventID]
     return removed_items, groups_dict
@@ -258,8 +265,8 @@ def reorder_csv_in_place(csv_path, order_list):
     data = []
     with open(csv_path, mode="r", newline="") as csv_file:
         reader = csv.reader(csv_file)
-        header = next(reader) 
-        data = list(reader)  
+        header = next(reader)
+        data = list(reader)
 
     rows_by_key = {row[0]: row for row in data if row}
 
@@ -270,8 +277,8 @@ def reorder_csv_in_place(csv_path, order_list):
 
     with open(csv_path, mode="w", newline="") as csv_file:
         writer = csv.writer(csv_file)
-        writer.writerow(header)  
-        writer.writerows(sorted_data)  
+        writer.writerow(header)
+        writer.writerows(sorted_data)
 
 
 def prepare_results(output_dir, parser_name, sample_size, list_to_insert, order_list):
@@ -324,7 +331,8 @@ def append_unique_to_csv(data_list, file_path):
 
     if "Count" in new_data.columns:
         new_data = new_data.drop(columns="Count")
-    new_data = new_data.groupby(new_data.columns.tolist(), as_index=False).size()
+    new_data = new_data.groupby(
+        new_data.columns.tolist(), as_index=False).size()
     new_data = new_data.rename(columns={"size": "Count"})
 
     if file.is_file():
@@ -388,11 +396,11 @@ if __name__ == "__main__":
             os.makedirs(out_path)
         setting = benchmark_settings[system]
         start_time = datetime.now()
-        Drain_parser1 = grouping.LogParser(
-            rex=setting["regex"], depth=setting["depth"], st=setting["st"]
+        Drain_parser1 = grouping.LogGrouper(
+            regexes=setting["regex"], depth=setting["depth"], similarity_threshold=setting["st"]
         )
         logs = read_column_from_csv(log_file)
-        grouped_logs = Drain_parser1.parse(logs)
+        grouped_logs = Drain_parser1.group(logs)
         groups_dict = group_logs_using_parser(grouped_logs)
         groups_dict = sort_dict_by_content_length(groups_dict)
         print("==================", flush=True)
@@ -409,17 +417,19 @@ if __name__ == "__main__":
         llama_parser1 = llama_parser.LogParser(
             pipeline=pipeline,
             model=model_path,
-            regex_manager1=regex_manager1,
+            regex_manager=regex_manager1,
             regex_sample=regex_sample,
-            similarity=similarity,
+            similarity_measure=similarity,
             do_self_reflection=do_self_reflection,
         )
         for eventid in tqdm(groups_dict.keys(), desc=f"Processing events {system}"):
             append_unique_to_csv(groups_dict[eventid], out_path + "group.csv")
             res_list = []
             logs_from_group = get_logs_from_group(groups_dict[eventid])
-            res_list = llama_parser1.parse(groups_dict[eventid], logs_from_group)
-            out_file = res_list_to_file(res_list, out_path, regex_sample=regex_sample)
+            res_list = llama_parser1.parse(
+                groups_dict[eventid], logs_from_group)
+            out_file = res_list_to_file(
+                res_list, out_path, regex_sample=regex_sample)
 
         Drain_parser1.print_time()
         regex_manager1.print_time()
