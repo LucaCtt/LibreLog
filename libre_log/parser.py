@@ -1,4 +1,4 @@
-import torch
+from ollama import chat
 import re
 import random
 import textdistance
@@ -108,7 +108,6 @@ def check_and_truncate_regex(pattern):
 class LogParser:
     def __init__(
         self,
-        pipeline,
         regex_manager,
         model="llama3-8b",
         regex_sample=5,
@@ -119,10 +118,170 @@ class LogParser:
         self.new_event = 0
         self.model = model
         self.regex_sample = regex_sample
-        self.pipeline = pipeline
         self.regex_manager = regex_manager
         self.similarity_measure = similarity_measure
         self.do_self_reflection = do_self_reflection
+
+    def parse(self, groups_from_parser, logs):
+        """
+        Parse logs and generate regex patterns for them.
+
+        Args:
+            groups_from_parser (list): A list of dictionaries containing log information.
+            logs (list): A list of log strings.
+
+        Returns:
+            list: A list of tuples containing log content, event ID, and regex pattern.
+        """
+        result_list = []
+        start_time = datetime.now()
+
+        if self.__check_predefined_logs(log_list=logs, is_dict=False):
+            result_list = self.__store_regex_for_logs(
+                result_list, groups_from_parser, re.escape(logs[0]).replace("\ ", " ")
+            )
+        else:
+            for log in logs[::-1]:
+                matched_regex = self.regex_manager.find_matched_regex_template(log)
+                if matched_regex:
+                    logs.remove(log)
+                    groups_from_parser = self.__remove_first_matching_item(
+                        groups_from_parser, log
+                    )
+                    result_list.append([log, "0", matched_regex])
+            if logs:
+                log_regex = self.__generate_log_template(log_list=logs)
+                result_list = self.__store_regex_for_logs(
+                    result_list, groups_from_parser, log_regex
+                )
+        time_taken = datetime.now() - start_time
+        self.total_time += time_taken.total_seconds()
+
+        return result_list
+
+    def __check_predefined_logs(self, log_list, is_dict=False):
+        """
+        Check if the log list contains pre-defined logs.
+
+        Args:
+            log_list (list): A list of log strings or dictionaries containing logs.
+            is_dict (bool, optional): Flag to indicate if logs are in dictionary format. Defaults to False.
+
+        Returns:
+            bool: True if the log list contains pre-defined logs, False otherwise.
+        """
+        if is_dict:
+            log_list = get_logs_from_group(log_list)
+        unique_logs = list(set(log_list))
+        first_log = unique_logs[0]
+        if len(unique_logs) != 1:
+            return False
+        elif (
+            (" is " in first_log)
+            or ("=" in first_log)
+            or (" to " in first_log)
+            or ("_" in first_log)
+            or ("-" in first_log)
+            or (":" in first_log)
+            or ("." in first_log)
+            or any(char.isdigit() for char in first_log)
+        ):
+            return False
+        return True
+
+    def __store_regex_for_logs(self, result_list, group_dict_list, log_regex):
+        """
+        Store regex patterns for logs and handle wrong logs.
+
+        Args:
+            result_list (list): A list to store the results.
+            group_dict_list (list): A list of dictionaries containing log information.
+            log_regex (str): The regex pattern to match against the logs.
+
+        Returns:
+            list: The updated result list.
+        """
+        result_list, wrong_logs = self.__check_regex_from_groups(
+            result_list, group_dict_list, log_regex
+        )
+        len_wrong = len(wrong_logs)
+        test_time = 0
+        while len(wrong_logs) > 0 and (test_time < 3 and len_wrong == len(wrong_logs)):
+            len_wrong = len(wrong_logs)
+            test_time = test_time + 1
+            log_regex = self.__generate_log_template(log_list=wrong_logs, is_dict=True)
+            result_list, wrong_logs = self.__check_regex_from_groups(
+                result_list, wrong_logs, log_regex, self.new_event
+            )
+            if len_wrong != len(wrong_logs):
+                self.new_event = self.new_event + 1
+        for log in wrong_logs:
+            result_list.append((log["Content"], self.new_event, log_regex))
+            self.new_event = self.new_event + 1
+        return result_list
+
+    def __generate_log_template(
+        self,
+        log_list,
+        is_dict=False,
+    ):
+        """
+        Generate a log template using the specified pipeline.
+
+        Args:
+            log_list (list): A list of log strings or dictionaries containing logs.
+            is_dict (bool, optional): Flag to indicate if logs are in dictionary format. Defaults to False.
+            do_sample (bool, optional): Flag to indicate if sampling should be used. Defaults to False.
+            max_new_tokens (int, optional): The maximum number of new tokens to generate. Defaults to 1024.
+
+        Returns:
+            str: The generated log template.
+        """
+        if self.__check_predefined_logs(log_list, is_dict=is_dict):
+            if is_dict:
+                log_list = get_logs_from_group(log_list)
+            return re.escape(log_list[0]).replace("\ ", " ")
+
+        prompt, sampled_log_list = self.__generate_prompt_with_log_list(
+            log_list, is_dict=is_dict
+        )
+
+        response = chat(model=self.model, messages=prompt)
+        out = response.message.content
+        result = self.__clean_regex(sampled_log_list[0], self.__template_to_regex(out))
+        return result
+
+    def __generate_prompt_with_log_list(self, log_list, dic=False):
+        """
+        Generate a prompt for the log list using the default model.
+
+        Args:
+            log_list (list): A list of log strings or dictionaries containing logs.
+            dic (bool, optional): Flag to indicate if logs are in dictionary format. Defaults to False.
+
+        Returns:
+            tuple: A tuple containing the full prompt and the trimmed list of logs.
+        """
+        trimmed_log_list = self.__adaptive_random_sampling(
+            log_list, self.regex_sample, dic=dic
+        )
+        messages = [
+            {
+                "role": "system",
+                "content": "You will be provided with a list of logs. You must identify and abstract all the dynamic variables in logs with '<*>' and output ONE static log template that matches all the logs. Print the input logs' template delimited by backticks",
+            },
+            {
+                "role": "user",
+                "content": 'Log list: ["try to connected to host: 172.16.254.1, finished.", "try to connected to host: 173.16.254.2, finished."]',
+            },
+            {
+                "role": "assistant",
+                "content": "`try to connected to host: <*>, finished.`",
+            },
+            {"role": "user", "content": f"Log list: {trimmed_log_list}"},
+        ]
+
+        return messages, trimmed_log_list
 
     def cosine_similarity_distance(self, text1, text2):
         """
@@ -183,7 +342,7 @@ class LogParser:
             distances.append(min_distance)
         return distances
 
-    def adaptive_random_sampling(
+    def __adaptive_random_sampling(
         self, logs, sample_size, max_logs=200, similarity_flag=False, dic=False
     ):
         """
@@ -239,143 +398,7 @@ class LogParser:
 
         return [log.replace(",", "") for log in sample_list]
 
-    def generate_prompt_with_log_list(self, log_list, dic=False):
-        """
-        Generate a prompt for the log list using the default model.
-
-        Args:
-            log_list (list): A list of log strings or dictionaries containing logs.
-            dic (bool, optional): Flag to indicate if logs are in dictionary format. Defaults to False.
-
-        Returns:
-            tuple: A tuple containing the full prompt and the trimmed list of logs.
-        """
-        trimmed_log_list = self.adaptive_random_sampling(
-            log_list, self.regex_sample, dic=dic
-        )
-        message = [
-            {
-                "role": "system",
-                "content": """You will be provided with a list of logs. You must identify and abstract all the dynamic variables in logs with '<*>' and output ONE static log template that matches all the logs. Print the input logs' template delimited by backticks""",
-            },
-            {
-                "role": "user",
-                "content": 'Log list: ["try to connected to host: 172.16.254.1, finished.", "try to connected to host: 173.16.254.2, finished."]',
-            },
-            {
-                "role": "assistant",
-                "content": "`try to connected to host: <*>, finished.`",
-            },
-            {"role": "user", "content": f"Log list: {trimmed_log_list}"},
-        ]
-
-        full_prompt = self.pipeline.tokenizer.apply_chat_template(
-            message, tokenize=False, add_generation_prompt=True
-        )
-        return full_prompt, trimmed_log_list
-
-    def generate_prompt_with_log_list_chatglm(self, log_list, dic=False):
-        """
-        Generate a prompt for the log list using the ChatGLM model.
-
-        Args:
-            log_list (list): A list of log strings or dictionaries containing logs.
-            dic (bool, optional): Flag to indicate if logs are in dictionary format. Defaults to False.
-
-        Returns:
-            tuple: A tuple containing the messages and the trimmed list of logs.
-        """
-        trimmed_log_list = self.adaptive_random_sampling(
-            log_list, self.regex_sample, dic=dic
-        )
-        messages = [
-            {
-                "role": "system",
-                "content": """You will be provided with a list of logs. You must identify and abstract ALL the dynamic variables in logs with ‘<VARIABLE>‘ and output ONLY ONE static log template that matches all the logs in the log list. Print the input logs’ template delimited by backticks.""",
-            },
-            {
-                "role": "user",
-                "content": 'Log list: ["try to connected to host: 172.16.254.1, finished.", "try to connected to host: 173.16.254.2, finished."]',
-            },
-            {
-                "role": "assistant",
-                "content": "Log Template: `try to connected to host: <VARIABLE>, finished.`",
-            },
-            {"role": "user", "content": f"Log list: {trimmed_log_list}"},
-        ]
-
-        return messages, trimmed_log_list
-
-    def generate_prompt_with_log_list_mistral(self, log_list, dic=False):
-        """
-        Generate a prompt for the log list using the Mistral model.
-
-        Args:
-            log_list (list): A list of log strings or dictionaries containing logs.
-            dic (bool, optional): Flag to indicate if logs are in dictionary format. Defaults to False.
-
-        Returns:
-            tuple: A tuple containing the full prompt and the trimmed list of logs.
-        """
-        trimmed_log_list = self.adaptive_random_sampling(
-            log_list, self.regex_sample, dic=dic
-        )
-        messages = [
-            {
-                "role": "user",
-                "content": """You will be provided with a list of logs. You must identify and abstract all the dynamic variables in logs with ‘<*>‘ and output ONE static log template that matches all the logs. Print the input logs’ template delimited by backticks""",
-            },
-            {
-                "role": "assistant",
-                "content": "OK!",
-            },
-            {
-                "role": "user",
-                "content": 'Log list: ["try to connected to host: 172.16.254.1, finished.", "try to connected to host: 173.16.254.2, finished."]',
-            },
-            {
-                "role": "assistant",
-                "content": "`try to connected to host: <*>, finished.`",
-            },
-            {"role": "user", "content": f"Log list: {trimmed_log_list}"},
-        ]
-        full_prompt = self.pipeline.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-
-        return full_prompt, trimmed_log_list
-
-    def check_pre_logs(self, log_list, is_dict=False):
-        """
-        Check if the log list contains pre-defined logs.
-
-        Args:
-            log_list (list): A list of log strings or dictionaries containing logs.
-            is_dict (bool, optional): Flag to indicate if logs are in dictionary format. Defaults to False.
-
-        Returns:
-            bool: True if the log list contains pre-defined logs, False otherwise.
-        """
-        if is_dict:
-            log_list = get_logs_from_group(log_list)
-        unique_logs = list(set(log_list))
-        first_log = unique_logs[0]
-        if len(unique_logs) != 1:
-            return False
-        elif (
-            (" is " in first_log)
-            or ("=" in first_log)
-            or (" to " in first_log)
-            or ("_" in first_log)
-            or ("-" in first_log)
-            or (":" in first_log)
-            or ("." in first_log)
-            or any(char.isdigit() for char in first_log)
-        ):
-            return False
-        return True
-
-    def check_long_logs(self, log_list, is_dict=False):
+    def __check_long_logs(self, log_list, is_dict=False):
         """
         Check if the log list contains long logs that match a specific pattern.
 
@@ -394,7 +417,7 @@ class LogParser:
             return True
         return False
 
-    def template_to_regex(self, template):
+    def __template_to_regex(self, template):
         """
         Convert a log template to a regex pattern.
 
@@ -455,7 +478,7 @@ class LogParser:
         regex_pattern = check_and_truncate_regex(regex_pattern)
         return regex_pattern
 
-    def generalize_regex(self, target_string, regex_pattern):
+    def __generalize_regex(self, target_string, regex_pattern):
         """
         Generalize a regex pattern to match a target string.
 
@@ -476,11 +499,11 @@ class LogParser:
                     )
                     if re.match(modified_pattern, target_string):
                         return modified_pattern
-        except:
+        except re.error:
             return regex_pattern
         return regex_pattern
 
-    def correct_single_template(self, template, user_strings=None):
+    def __correct_single_template(self, template, user_strings=None):
         """
         Correct a single log template by replacing certain patterns with generic placeholders.
 
@@ -601,7 +624,7 @@ class LogParser:
 
         return template
 
-    def replace_nth(self, string, old, new, n):
+    def __replace_nth(self, string, old, new, n):
         """
         Replace the nth occurrence of a substring in a string.
 
@@ -619,7 +642,7 @@ class LogParser:
             return string
         return old.join(parts[:n]) + new + old.join(parts[n:])
 
-    def check_and_modify_regex(self, regex_pattern, target_string):
+    def __check_and_modify_regex(self, regex_pattern, target_string):
         """
         Check and modify a regex pattern to ensure it matches the target string.
 
@@ -633,7 +656,7 @@ class LogParser:
         try:
             pattern = re.compile(regex_pattern)
             match = pattern.match(target_string)
-        except:
+        except re.error:
             return regex_pattern
 
         if not match:
@@ -645,28 +668,28 @@ class LogParser:
             pattern = re.compile(regex_pattern)
             match = pattern.match(target_string)
             groups = match.groups()
-        except:
+        except re.error:
             return regex_pattern
         modified_regex = regex_pattern
         for i, group in enumerate(groups, start=1):
             if group is not None and re.fullmatch(r"\*+", group):
                 replacement = "\\" + "\\".join(list(group))
-                modified_regex = self.replace_nth(
+                modified_regex = self.__replace_nth(
                     modified_regex, "(.*?)", replacement, i
                 )
             if group is not None and group.endswith(" "):
                 replacement = "(.*?) "
-                modified_regex = self.replace_nth(
+                modified_regex = self.__replace_nth(
                     modified_regex, "(.*?)", replacement, i
                 )
             if group is not None and group.startswith(" "):
                 replacement = " (.*?)"
-                modified_regex = self.replace_nth(
+                modified_regex = self.__replace_nth(
                     modified_regex, "(.*?)", replacement, i
                 )
         return modified_regex
 
-    def clean_regex(self, log, regex_pattern):
+    def __clean_regex(self, log, regex_pattern):
         """
         Clean and generalize a regex pattern to match a log string.
 
@@ -683,136 +706,13 @@ class LogParser:
             .replace("a-f", "a-z")
             .replace("A-F", "A-Z")
         )
-        regex_pattern = self.correct_single_template(regex_pattern)
+        regex_pattern = self.__correct_single_template(regex_pattern)
         if log:
-            regex_pattern = self.generalize_regex(log, regex_pattern)
-            regex_pattern = self.check_and_modify_regex(regex_pattern, log)
+            regex_pattern = self.__generalize_regex(log, regex_pattern)
+            regex_pattern = self.__check_and_modify_regex(regex_pattern, log)
         return regex_pattern
 
-    def generate_log_template_using_pipeline(
-        self,
-        log_list,
-        is_dict=False,
-        do_sample=False,
-        max_new_tokens=1024,
-    ):
-        """
-        Generate a log template using the specified pipeline.
-
-        Args:
-            log_list (list): A list of log strings or dictionaries containing logs.
-            is_dict (bool, optional): Flag to indicate if logs are in dictionary format. Defaults to False.
-            do_sample (bool, optional): Flag to indicate if sampling should be used. Defaults to False.
-            max_new_tokens (int, optional): The maximum number of new tokens to generate. Defaults to 1024.
-
-        Returns:
-            str: The generated log template.
-        """
-        if self.check_pre_logs(log_list, is_dict=is_dict):
-            if is_dict:
-                log_list = get_logs_from_group(log_list)
-            return re.escape(log_list[0]).replace("\ ", " ")
-        try:
-            if "chatglm" in self.model:
-                messages, sampled_log_list = self.generate_prompt_with_log_list_chatglm(
-                    log_list, is_dict=is_dict
-                )
-                response, history = self.pipeline[0].chat(
-                    self.pipeline[1],
-                    messages[-1]["content"],
-                    history=messages[:-1],
-                    do_sample=do_sample,
-                )
-                return self.clean_regex(
-                    sampled_log_list[0], self.template_to_regex(response)
-                )
-            elif "Mistral" in self.model or "codegemma" in self.model:
-                prompt, sampled_log_list = self.generate_prompt_with_log_list_mistral(
-                    log_list, is_dict=is_dict
-                )
-                outputs = self.pipeline(
-                    prompt,
-                    max_new_tokens=max_new_tokens,
-                    do_sample=do_sample,
-                )
-                return self.clean_regex(
-                    sampled_log_list[0],
-                    self.template_to_regex(outputs[0]["generated_text"][len(prompt) :]),
-                )
-            else:
-                prompt, sampled_log_list = self.generate_prompt_with_log_list(
-                    log_list, is_dict=is_dict
-                )
-                terminators = [
-                    self.pipeline.tokenizer.eos_token_id,
-                    self.pipeline.tokenizer.convert_tokens_to_ids("<|eot_id|>"),
-                ]
-                outputs = self.pipeline(
-                    prompt,
-                    max_new_tokens=max_new_tokens,
-                    eos_token_id=terminators,
-                    do_sample=do_sample,
-                    pad_token_id=self.pipeline.tokenizer.eos_token_id,
-                )
-                out = outputs[0]["generated_text"][len(prompt) :]
-                result = self.clean_regex(
-                    sampled_log_list[0], self.template_to_regex(out)
-                )
-                return result
-        except torch.cuda.OutOfMemoryError:
-            print(f"Out of memory, try to reduce the number of samples", flush=True)
-            self.regex_sample = self.regex_sample - 1
-            if "chatglm" in self.model:
-                messages, sampled_log_list = self.generate_prompt_with_log_list_chatglm(
-                    log_list, is_dict=is_dict
-                )
-                response, history = self.pipeline[0].chat(
-                    self.pipeline[1],
-                    messages[-1]["content"],
-                    history=messages[:-1],
-                    do_sample=do_sample,
-                )
-                self.regex_sample = self.regex_sample + 1
-                return self.clean_regex(
-                    sampled_log_list[0], self.template_to_regex(response)
-                )
-            elif "Mistral" in self.model or "codegemma" in self.model:
-                prompt, sampled_log_list = self.generate_prompt_with_log_list_mistral(
-                    log_list, is_dict=is_dict
-                )
-                outputs = self.pipeline(
-                    prompt,
-                    max_new_tokens=max_new_tokens,
-                    do_sample=do_sample,
-                )
-                self.regex_sample = self.regex_sample + 1
-                return self.clean_regex(
-                    sampled_log_list[0],
-                    self.template_to_regex(outputs[0]["generated_text"][len(prompt) :]),
-                )
-            else:
-                prompt, sampled_log_list = self.generate_prompt_with_log_list(
-                    log_list, is_dict=is_dict
-                )
-                terminators = [
-                    self.pipeline.tokenizer.eos_token_id,
-                    self.pipeline.tokenizer.convert_tokens_to_ids("<|eot_id|>"),
-                ]
-
-                outputs = self.pipeline(
-                    prompt,
-                    max_new_tokens=max_new_tokens,
-                    eos_token_id=terminators,
-                    do_sample=do_sample,
-                    pad_token_id=self.pipeline.tokenizer.eos_token_id,
-                )
-                self.regex_sample = self.regex_sample + 1
-                return self.clean_regex(
-                    sampled_log_list[0],
-                    self.template_to_regex(outputs[0]["generated_text"][len(prompt) :]),
-                )
-
-    def extract_logs_from_group(self, group_list):
+    def __extract_logs_from_group(self, group_list):
         """
         Extract log contents from a list of group dictionaries.
 
@@ -827,7 +727,7 @@ class LogParser:
             logs.append(element["Content"])
         return logs
 
-    def find_longest_backtick_content(self, text):
+    def __find_longest_backtick_content(self, text):
         """
         Find the longest content enclosed in backticks in the given text.
 
@@ -846,7 +746,7 @@ class LogParser:
                 return max(matches, key=len)
         return text
 
-    def clean_generated_regex(self, log, template):
+    def __clean_generated_regex(self, log, template):
         """
         Clean and generalize a generated regex pattern to match a log string.
 
@@ -857,7 +757,7 @@ class LogParser:
         Returns:
             str: The cleaned and generalized regex pattern.
         """
-        template = self.find_longest_backtick_content(template)
+        template = self.__find_longest_backtick_content(template)
         template = template.strip()
         while template.startswith("`"):
             template = template[1:]
@@ -882,9 +782,9 @@ class LogParser:
             template = template[:-8]
         template = template.replace(",", "")
         template = template.replace("\ ", " ")
-        return self.clean_regex(log=log, regex_pattern=template)
+        return self.__clean_regex(log=log, regex_pattern=template)
 
-    def check_regex_from_groups(
+    def __check_regex_from_groups(
         self, result_list, group_dict_list, log_regex, new_event=0
     ):
         """
@@ -916,40 +816,7 @@ class LogParser:
                 result_list.append((log["Content"], log["EventId"], log_regex))
         return result_list, wrong_logs
 
-    def store_regex_for_logs(self, result_list, group_dict_list, log_regex):
-        """
-        Store regex patterns for logs and handle wrong logs.
-
-        Args:
-            result_list (list): A list to store the results.
-            group_dict_list (list): A list of dictionaries containing log information.
-            log_regex (str): The regex pattern to match against the logs.
-
-        Returns:
-            list: The updated result list.
-        """
-        result_list, wrong_logs = self.check_regex_from_groups(
-            result_list, group_dict_list, log_regex
-        )
-        len_wrong = len(wrong_logs)
-        test_time = 0
-        while len(wrong_logs) > 0 and (test_time < 3 and len_wrong == len(wrong_logs)):
-            len_wrong = len(wrong_logs)
-            test_time = test_time + 1
-            log_regex = self.generate_log_template_using_pipeline(
-                log_list=wrong_logs, is_dict=True
-            )
-            result_list, wrong_logs = self.check_regex_from_groups(
-                result_list, wrong_logs, log_regex, self.new_event
-            )
-            if len_wrong != len(wrong_logs):
-                self.new_event = self.new_event + 1
-        for log in wrong_logs:
-            result_list.append((log["Content"], self.new_event, log_regex))
-            self.new_event = self.new_event + 1
-        return result_list
-
-    def remove_first_matching_item(self, data, content_to_remove):
+    def __remove_first_matching_item(self, data, content_to_remove):
         """
         Remove the first item from the list that matches the given content.
 
@@ -965,38 +832,3 @@ class LogParser:
                 del data[i]
                 break
         return data
-
-    def parse(self, groups_from_parser, logs):
-        """
-        Parse logs and generate regex patterns for them.
-
-        Args:
-            groups_from_parser (list): A list of dictionaries containing log information.
-            logs (list): A list of log strings.
-
-        Returns:
-            list: A list of tuples containing log content, event ID, and regex pattern.
-        """
-        result_list = []
-        start_time = datetime.now()
-        if self.check_pre_logs(log_list=logs, is_dict=False):
-            result_list = self.store_regex_for_logs(
-                result_list, groups_from_parser, re.escape(logs[0]).replace("\ ", " ")
-            )
-        else:
-            for log in logs[::-1]:
-                matched_regex = self.regex_manager.find_matched_regex_template(log)
-                if matched_regex:
-                    logs.remove(log)
-                    groups_from_parser = self.remove_first_matching_item(
-                        groups_from_parser, log
-                    )
-                    result_list.append([log, "0", matched_regex])
-            if logs:
-                log_regex = self.generate_log_template_using_pipeline(log_list=logs)
-                result_list = self.store_regex_for_logs(
-                    result_list, groups_from_parser, log_regex
-                )
-        time_taken = datetime.now() - start_time
-        self.total_time += time_taken.total_seconds()
-        return result_list

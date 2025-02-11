@@ -4,7 +4,7 @@ import torch
 import csv
 import sys
 import argparse
-import llama_parser
+import libre_log.parser as parser
 import transformers
 import regex as re
 import pandas as pd
@@ -414,7 +414,7 @@ if __name__ == "__main__":
         )
         print("==================", flush=True)
         regex_manager1 = regex_manager.RegexTemplateManager()
-        llama_parser1 = llama_parser.LogParser(
+        llama_parser1 = parser.LogParser(
             pipeline=pipeline,
             model=model_path,
             regex_manager=regex_manager1,
