@@ -92,11 +92,11 @@ class LogGrouper:
         root_node = Node()
         log_clusters = []
 
-        self.load_data(logs)
+        self.__load_data(logs)
 
         for _, line in self.df_log.iterrows():
-            log_id = line["LineId"]
-            log_message = self.__preprocess_line(line["Content"]).strip().split()
+            log_id = line["line_number"]
+            log_message = self.__preprocess_line(line["text"]).strip().split()
             match_cluster = self.__tree_search(root_node, log_message)
 
             if match_cluster is None:
@@ -112,13 +112,13 @@ class LogGrouper:
                 if " ".join(new_template) != " ".join(match_cluster.log_template):
                     match_cluster.log_template = new_template
 
-        list_result = self.outputResult(log_clusters)
+        list_result = self.__output_result(log_clusters)
         time_taken = datetime.now() - start_time
         self.total_time += time_taken.total_seconds()
 
         return list_result
 
-    def load_data(self, logs):
+    def __load_data(self, logs):
         """
         Loads and preprocesses log data into a pandas DataFrame.
         
@@ -131,10 +131,10 @@ class LogGrouper:
             return log
 
         line_count = len(logs)
-        self.df_log = pd.DataFrame(logs, columns=["Content"])
-        self.df_log.insert(0, "LineId", None)
-        self.df_log["LineId"] = [i + 1 for i in range(line_count)]
-        self.df_log["Content_"] = self.df_log["Content"].map(preprocess)
+        self.df_log = pd.DataFrame(logs, columns=["text"])
+        self.df_log.insert(0, "line_number", None)
+        self.df_log["line_number"] = [i + 1 for i in range(line_count)]
+        self.df_log["text_"] = self.df_log["text"].map(preprocess)
 
     def __preprocess_line(self, line):
         """
@@ -340,7 +340,7 @@ class LogGrouper:
 
         return template
 
-    def output_result(self, log_clusters):
+    def __output_result(self, log_clusters):
         """
         Generates the output result from the log clusters.
 
@@ -363,19 +363,19 @@ class LogGrouper:
                 log_template_ids[log_id] = template_id
             df_events.append([template_id, template_str, occurrence])
 
-        self.df_log["EventId"] = log_template_ids
-        self.df_log["EventTemplate"] = log_templates
+        self.df_log["template_id"] = log_template_ids
+        self.df_log["template"] = log_templates
         if self.keep_params:
-            self.df_log["ParameterList"] = self.df_log.apply(
-                self.get_parameter_list, axis=1
+            self.df_log["parameters_list"] = self.df_log.apply(
+                self.__get_parameter_list, axis=1
             )
         array_result = self.df_log.loc[
-            :, ["Content", "EventId", "EventTemplate"]
+            :, ["text", "template_id", "template"]
         ].values
         list_result = [list(row) for row in array_result]
         return list_result
 
-    def get_parameter_list(self, row):
+    def __get_parameter_list(self, row):
         """
         Extracts the parameter list from a log message based on the event template.
 
@@ -391,7 +391,7 @@ class LogGrouper:
         template_regex = re.sub(r"([^A-Za-z0-9])", r"\\\1", template_regex)
         template_regex = re.sub(r"\\ +", r"\s+", template_regex)
         template_regex = "^" + template_regex.replace("<*>", "(.*?)") + "$"
-        parameter_list = re.findall(template_regex, row["Content"])
+        parameter_list = re.findall(template_regex, row["text"])
         parameter_list = parameter_list[0] if parameter_list else ()
         parameter_list = (
             list(parameter_list)
